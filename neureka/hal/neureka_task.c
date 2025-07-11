@@ -62,6 +62,9 @@ void neureka_task_set_op_to_conv(neureka_task_t *task,
 
   task->data.cfg.conf0 &= ~(NEUREKA_MASK_FLAG_MODE);
   task->data.cfg.conf0 |= flag_mode;
+  // turn off rounding
+  task->data.cfg.conf0 |= (1 << 11);
+
 }
 
 void neureka_task_set_bits(neureka_task_t *task, const uint8_t input_bits,
