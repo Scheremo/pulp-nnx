@@ -270,7 +270,9 @@ class NnxTestGenerator:
                     weight[i,i,0,0] = 1
             else:
                 weight_mean = NnxTestGenerator._DEFAULT_WEIGHT_MEAN
-                weight_std  = NnxTestGenerator._DEFAULT_WEIGHT_STDEV * (1<<(conf.weight_type._bits-1)-1)
+                # Preserve the existing distribution for 2..8 bits; binary
+                # weights also need a nonzero spread, not a negative shift.
+                weight_std = NnxTestGenerator._DEFAULT_WEIGHT_STDEV * (1 << max(conf.weight_type._bits - 2, 0))
                 weight = NnxTestGenerator._random_data_normal(
                     mean = weight_mean,
                     std = weight_std,
@@ -382,7 +384,7 @@ class NnxTestHeaderGenerator:
         assert test.weight is not None
         weight_type = test.conf.weight_type
         weight_bits = weight_type._bits
-        assert weight_bits > 1 and weight_bits <= 8
+        assert 1 <= weight_bits <= 8
         if test.synthetic_weights:
             weight_offset = 0
         else:

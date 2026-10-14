@@ -36,13 +36,25 @@ class NeurekaMemoryLayout:
         Expected weight shape is (cout, cin, H, W).
         The produced memory layout depends on the weight kernel shape:
           - 3x3: (cout, cinMajor, Bits, H x W x cinMinor_3x3 packed into Weight Bandwidth bits),
-          - 1x1: (cout, cinMajor, Bits x H x W x cinMinor_1x1 packed into Weight Bandwidth bits),
+          - 1x1: (cout/32, cin/32, output group/8, Bits, output lane, input lane),
+            with both channel dimensions padded to 32 and 32 bytes per bit plane.
         where cinMajor is the ceil(cin / cin subtile <mode>) and cinMinor has to be padded with 0 to cin subtile <mode>.
         """
         if depthwise:
             weight = weight.transpose(1, 0, 2, 3)  # Swap cout and cin
 
         cout, cin, height, width = weight.shape
+        if (height, width) == (1, 1):
+            if not 1 <= bits <= 8 or not cout or not cin:
+                raise ValueError("Pointwise weights require nonzero channels and 1..8 bits")
+            ko, ki = (cout + 31) // 32, (cin + 31) // 32
+            weight = np.pad(weight[:, :, 0, 0], ((0, ko * 32 - cout), (0, ki * 32 - cin)))
+            # [KO, group, output lane, KI, input lane, bit]
+            weight = np.unpackbits(weight.reshape(ko, 4, 8, ki, 32, 1),
+                                   axis=-1, count=bits, bitorder="little")
+            weight = weight.transpose(0, 3, 1, 5, 2, 4)
+            return np.packbits(weight, axis=-1, bitorder="little").flatten()
+
         cinSubtile = (
             NeurekaMemoryLayout._CIN_SUBTILE_3x3
             if height == 3
@@ -85,11 +97,6 @@ class NeurekaMemoryLayout:
                 constant_values=0,
             )
             weightBandwidthBytes = int(np.ceil(NeurekaMemoryLayout._WEIGHT_BANDWIDTH_3x3 / 8))
-        elif height == 1 and width == 1:
-            # (cout * cinMajor, Bits * cinSubtile)
-            weight = weight.reshape(-1, bits * cinSubtile)
-            # No padding needed here
-            weightBandwidthBytes = int(np.ceil(bits * cinSubtile / 8))
 
         # Prepare for packing
         # (-1, Weight Bandwidth Bytes, 8)
@@ -111,6 +118,15 @@ class NeurekaMemoryLayout:
         width: int,
     ) -> npt.NDArray[np.uint8]:
         """Reverse of weightEncode"""
+        if (height, width) == (1, 1):
+            if not 1 <= bits <= 8 or not cout or not cin:
+                raise ValueError("Pointwise weights require nonzero channels and 1..8 bits")
+            ko, ki = (cout + 31) // 32, (cin + 31) // 32
+            weight = np.unpackbits(weight, bitorder="little").reshape(ko, ki, 4, bits, 8, 32)
+            weight = weight.transpose(0, 2, 4, 1, 5, 3)
+            weight = np.packbits(weight, axis=-1, bitorder="little")
+            return weight.reshape(ko * 32, ki * 32, 1, 1)[:cout, :cin]
+
         cinSubtile = (
             NeurekaMemoryLayout._CIN_SUBTILE_3x3
             if height == 3
@@ -118,22 +134,17 @@ class NeurekaMemoryLayout:
         )
         cinMajor = int(np.ceil(cin / cinSubtile))
         cinMinor = cinSubtile
-        weightBandwidthBytes = int(np.ceil(NeurekaMemoryLayout._WEIGHT_BANDWIDTH / 8))
+        weightBandwidthBytes = NeurekaMemoryLayout._WEIGHT_BANDWIDTH_3x3 // 8
 
         weight = weight.reshape(-1, weightBandwidthBytes, 1)
         weight = np.unpackbits(weight, axis=-1, count=8, bitorder="little")
-        weight = weight.reshape(-1, NeurekaMemoryLayout._WEIGHT_BANDWIDTH)
+        weight = weight.reshape(-1, NeurekaMemoryLayout._WEIGHT_BANDWIDTH_3x3)
 
         if height == 3 and width == 3:
             weight = weight[:, : height * width * cinMinor]
             weight = weight.reshape(
                 cout, cinMajor, bits, height * width, cinMinor
             ).transpose(0, 1, 4, 3, 2)
-        elif height == 1 and width == 1:
-            weight = weight[:, : height * width * cinMinor * 8]
-            weight = weight.reshape(cout, cinMajor, cinMinor // 4, 8, 4).transpose(
-                0, 1, 2, 4, 3
-            )
         weight = np.packbits(weight, axis=-1, bitorder="little")
         weight = weight.reshape(cout, cinMajor * cinMinor, height, width)
         weight = weight[:, :cin, :, :]
